@@ -6,41 +6,50 @@
 #include "camera.hpp"
 #include <memory>
 #include <pcl/visualization/cloud_viewer.h>
-int load_image()
-{
-}
+#include <thread>
+#include <X11/Xlib.h>
 std::mutex cloud_mutex; // 用于保护点云数据的互斥锁
 pcl::PointCloud<pcl::PointXYZ>::Ptr boardcloud(new pcl::PointCloud<pcl::PointXYZ>);
 pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
+pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> green(cloud, 0, 255, 0);
+pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> red(cloud, 255, 0, 0);
 
-void run_viewer(boost::shared_ptr<pcl::visualization::PCLVisualizer> viewer)
+void run_viewer()
 {
-    while (!viewer->wasStopped())
+    pcl::visualization::PCLVisualizer viewer("PCL Viewer");
+    while (!viewer.wasStopped())
     {
-        std::lock_guard<std::mutex> lock(cloud_mutex); // 加锁
-        viewer->spinOnce(100);
+        // std::lock_guard<std::mutex> lock(cloud_mutex); // 加锁
+        if (!viewer.updatePointCloud(cloud, red, "tof_cloud"))
+        {
+            viewer.addPointCloud(cloud, red, "tof_cloud");
+        }
+        if (!viewer.updatePointCloud(boardcloud, green, "board_cloud"))
+        {
+            viewer.addPointCloud(boardcloud, green, "board_cloud");
+        }
+        viewer.spinOnce(100);
     }
 }
-void VisualizationCallback(pcl::visualization::PCLVisualizer &viz)
-{
-    pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> green(cloud, 0, 255, 0);
-    pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> red(cloud, 255, 0, 0);
-    std::unique_lock<std::mutex> lockOnCallBack(cloud_mutex);
-    {
-        if (!viz.updatePointCloud(cloud, red, "tof_cloud"))
-        {
-            viz.addPointCloud(cloud, red, "tof_cloud");
-        }
+// void VisualizationCallback(pcl::visualization::PCLVisualizer &viz)
+// {
+//     std::unique_lock<std::mutex> lockOnCallBack(cloud_mutex);
+//     {
+//         if (!viz.updatePointCloud(cloud, red, "tof_cloud"))
+//         {
+//             viz.addPointCloud(cloud, red, "tof_cloud");
+//         }
 
-        if (!viz.updatePointCloud(boardcloud, green, "board_cloud"))
-        {
-            viz.addPointCloud(boardcloud, green, "board_cloud");
-        }
-    }
-}
+//         if (!viz.updatePointCloud(boardcloud, green, "board_cloud"))
+//         {
+//             viz.addPointCloud(boardcloud, green, "board_cloud");
+//         }
+//     }
+// }
 
 int main()
 {
+    XInitThreads();
     std::string folderPath = "/usr/local/project/data/"; // 例如 "C:/images/"
     std::string fileExtension = ".jpg";                  // 图片的扩展名
     std::string pointcloudExtension = ".pcd";            // 图片的扩展名
@@ -53,7 +62,8 @@ int main()
     // pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> red(cloud, 255, 0, 0);
     // auto PclViewerCallBack = std::bind(VisualizationCallback, std::placeholders::_1, cloud, boardcloud);
     // viewer.runOnVisualizationThread(PclViewerCallBack);
-    viewer.runOnVisualizationThread(VisualizationCallback);
+    // viewer.runOnVisualizationThread(VisualizationCallback);
+    std::thread vThread(run_viewer);
     for (int i = 0; i <= 174; ++i)
     {
         std::stringstream ss;
@@ -73,7 +83,7 @@ int main()
 
         // 更新点云数据
         {
-            std::unique_lock<std::mutex> lockOnMain(cloud_mutex);
+            // std::unique_lock<std::mutex> lockOnMain(cloud_mutex);
             if (!cloud->empty())
                 cloud->clear();
             if (pcl::io::loadPCDFile<pcl::PointXYZ>(pointcloudPath, *cloud) == -1)
@@ -105,4 +115,6 @@ int main()
             break;
         }
     }
+    vThread.join();
+    return 0;
 }
