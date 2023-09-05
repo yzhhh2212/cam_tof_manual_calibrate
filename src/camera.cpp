@@ -1,5 +1,16 @@
 #include "camera.hpp"
 
+Eigen::Matrix4d camera::_Tcl_Estimate = Eigen::Matrix4d::Identity();
+Eigen::Matrix4d camera::_Tlc_Estimate = Eigen::Matrix4d::Identity();
+Eigen::Matrix3d camera::_Rcl_Estimate = Eigen::Matrix3d::Identity();
+Eigen::Vector3d camera::_tcl_Estimate = Eigen::Vector3d::Zero();
+
+Eigen::Matrix4d camera::_Tcl_manual= Eigen::Matrix4d::Identity();
+Eigen::Matrix4d camera::_Tlc_manual= Eigen::Matrix4d::Identity();
+Eigen::Matrix3d camera::_Rcl_manual= Eigen::Matrix3d::Identity();
+Eigen::Vector3d camera::_tcl_manual= Eigen::Vector3d::Zero();
+
+
 camera::camera()
 {
     _col = 5;
@@ -23,7 +34,9 @@ bool camera::EstimateBoardPose(cv::Mat image)
 {
     cv::Size pattern_size(_col, _row);
     cv::Mat gray;
+    cv::Mat imgUndistort;
     std::vector<cv::Point2f> corners;
+    cv::undistort(image, imgUndistort, intrinsics_, distCoeffs_);
     cv::cvtColor(image, gray, cv::COLOR_BGR2GRAY);
 
     if (cv::findChessboardCorners(image, pattern_size, corners))
@@ -35,18 +48,30 @@ bool camera::EstimateBoardPose(cv::Mat image)
                          cv::TermCriteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 30, 0.1));
         if (corners.size() == _col * _row)
         {
+            _p3ds_plane.reserve(_row * _col * 121);
             int count = 0;
             for (int i = 0; i < _row; i++)
             {
                 for (int j = 0; j < _col; j++)
                 {
+                    float x = j * _square_size;
+                    float y = i * _square_size;
                     // Todo: change 3d-coordinate
                     _p3ds.emplace_back(
-                        cv::Point3f(j * _square_size, i * _square_size, 0.0));
+                        cv::Point3f(x, y, 0.0));
                     _p2ds.emplace_back(cv::Point2f(corners[count].x, corners[count].y));
                     count++;
+                    for (double k = 0; k < 0.0275; k += 0.00275)
+                    {
+                        double dx = (j + 1 < _col) ? 1 : -1;
+                        double dy = (i + 1 < _row) ? 1 : -1;
+
+                        _p3ds_plane.emplace_back(x + k * dx, y, 0.0);
+                        _p3ds_plane.emplace_back(x, y + k * dy, 0.0);
+                    }
                 }
             }
+
             cv::drawChessboardCorners(image, pattern_size, cv::Mat(corners), true);
         }
         else
@@ -64,8 +89,9 @@ bool camera::EstimateBoardPose(cv::Mat image)
         return false;
     // use PnP to calculate the pose
     cv::Mat r, t;
+    cv::Mat distCoeffs = cv::Mat::zeros(1, 5, CV_64F);
     cv::solvePnP(_p3ds, _p2ds, intrinsics_, distCoeffs_, r, t);
-    std::cout << "solvePnP" << std::endl;
+    // std::cout << "solvePnP" << std::endl;
     // type transform
     cv::Mat cvR;
     cv::Rodrigues(r, cvR);
@@ -84,9 +110,9 @@ bool camera::EstimateBoardPose(cv::Mat image)
     _Tbc.block<3, 3>(0, 0) = Rcb.inverse();
     _Tbc.block<3, 1>(0, 3) = -Rcb.inverse() * tcb;
 
-    std::cout << "pnp求位姿成功" << std::endl;
-    std::cout << "The transformation matrix _Tcb is: \n"
-              << _Tcb << std::endl;
+    // std::cout << "pnp求位姿成功" << std::endl;
+    // std::cout << "The transformation matrix _Tcb is: \n"
+    //           << _Tcb << std::endl;
     return true;
     // visualize coordinate
     // Eigen::Matrix3d K;
@@ -102,10 +128,77 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr camera::ProjectChessboardToCameraSpace()
 {
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
     std::vector<cv::Point3f> transformed_p3ds;
-    for (const auto &point : _p3ds)
+    for (const auto &point : _p3ds_plane)
     {
         Eigen::Vector4d point_homo(point.x, point.y, point.z, 1.0); // 齐次坐标
         Eigen::Vector4d transformed_point_homo = _Tcb * point_homo;
+        // transformed_p3ds.emplace_back(
+        //     cv::Point3f(transformed_point_homo(0), transformed_point_homo(1), transformed_point_homo(2)));
+        cloud->push_back(pcl::PointXYZ(transformed_point_homo(0), transformed_point_homo(1), transformed_point_homo(2)));
+    }
+    return cloud;
+}
+pcl::PointCloud<pcl::PointXYZ>::Ptr camera::ChessboardFromCam2TofEstimate()
+{
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
+    std::vector<cv::Point3f> transformed_p3ds;
+    for (const auto &point : _p3ds_plane)
+    {
+        Eigen::Vector4d point_homo(point.x, point.y, point.z, 1.0); // 齐次坐标
+        Eigen::Vector4d transformed_point_homo = _Tlc_Estimate * _Tcb * point_homo;
+        // transformed_p3ds.emplace_back(
+        //     cv::Point3f(transformed_point_homo(0), transformed_point_homo(1), transformed_point_homo(2)));
+        cloud->push_back(pcl::PointXYZ(transformed_point_homo(0), transformed_point_homo(1), transformed_point_homo(2)));
+    }
+    return cloud;
+}
+
+bool camera::Project3DTo2D(cv::Mat &image, pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud)
+{
+    for (const auto &point : cloud->points)
+    {
+        Eigen::Vector4d point_homo(point.x, point.y, point.z, 1.0); // 齐次坐标
+        Eigen::Vector4d transformed_point_homo = _Tcl_Estimate * point_homo;
+        cv::Mat point3D = (cv::Mat_<double>(3, 1) << transformed_point_homo(0), transformed_point_homo(1), transformed_point_homo(2));
+
+        cv::Mat point2D = 1 / point3D.at<double>(2,0) * intrinsics_ * point3D;
+
+        cv::Point2f pt2D(point2D.at<double>(0, 0), point2D.at<double>(1, 0));
+        // 畸变矫正（如果需要）
+        // std::vector<cv::Point2f> srcPoints = {cv::Point2f(point2D.at<double>(0, 0), point2D.at<double>(1, 0))};
+        // std::vector<cv::Point2f> dstPoints;
+        // cv::undistortPoints(srcPoints, dstPoints, intrinsics, distCoeffs);
+
+        // 绘制点
+        cv::circle(image, pt2D, 1 , cv::Scalar(0, 255, 0), -1 , cv::LINE_AA);
+    }
+}
+
+bool camera::UpdatePose(Eigen::Matrix4d Tcl,cv::Mat image,pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud)
+{
+    for (const auto &point : cloud->points)
+    {
+        Eigen::Vector4d point_homo(point.x, point.y, point.z, 1.0); // 齐次坐标
+        Eigen::Vector4d transformed_point_homo = Tcl * point_homo;
+        cv::Mat point3D = (cv::Mat_<double>(3, 1) << transformed_point_homo(0), transformed_point_homo(1), transformed_point_homo(2));
+
+        cv::Mat point2D = 1 / point3D.at<double>(2,0) * intrinsics_ * point3D;
+
+        cv::Point2f pt2D(point2D.at<double>(0, 0), point2D.at<double>(1, 0));
+
+        cv::circle(image, pt2D, 1 , cv::Scalar(0, 255, 0), -1 , cv::LINE_AA);
+        cv::imshow("image", image);
+    }
+
+}
+pcl::PointCloud<pcl::PointXYZ>::Ptr camera::Update3dPose(Eigen::Matrix4d Tcl)
+{
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
+    std::vector<cv::Point3f> transformed_p3ds;
+    for (const auto &point : _p3ds_plane)
+    {
+        Eigen::Vector4d point_homo(point.x, point.y, point.z, 1.0); // 齐次坐标
+        Eigen::Vector4d transformed_point_homo = Tcl.inverse() * _Tcb * point_homo;
         // transformed_p3ds.emplace_back(
         //     cv::Point3f(transformed_point_homo(0), transformed_point_homo(1), transformed_point_homo(2)));
         cloud->push_back(pcl::PointXYZ(transformed_point_homo(0), transformed_point_homo(1), transformed_point_homo(2)));
